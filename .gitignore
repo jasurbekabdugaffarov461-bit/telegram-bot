@@ -1,0 +1,13 @@
+# Maxfiy fayllar — HECH QACHON GitHub'ga yuklanmaydi
+bot_config.json
+userbot_config.json
+*.session
+*.session-journal
+userbot_state.json
+*.log
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
