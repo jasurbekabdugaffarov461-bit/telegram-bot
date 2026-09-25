@@ -9,7 +9,9 @@ Ikki qismdan iborat Telegram loyiha:
 2. **`userbot.py`**: shaxsiy akkaunt uchun AI yordamchi (Telethon + Gemini). U quyidagilarni qiladi:
    - lichkaga kelgan xabarlarga "Muhammad Alining shaxsiy AI yordamchisi" sifatida javob beradi;
    - so'kinishga ogohlantirish beradi;
-   - `/ai on`, `/ai off` va `/ai status` buyruqlari bilan boshqariladi.
+   - `/ai on`, `/ai off` va `/ai status` buyruqlari bilan boshqariladi;
+   - ketma-ket yozilgan xabarlarga bitta javob beradi;
+   - Gemini ishlamasa, zaxira xizmatlarga o'tadi: Groq → OpenRouter → Cerebras → Mistral → NVIDIA (hammasi bepul tarifda).
 
 `bad_words.py`: o'zbekcha (lotin va kirill), ruscha va inglizcha haqorat filtri. U `@`→a, `$`→s kabi almashtirishlarni, harf takrorlanishini (ahmooooq) va nuqta bilan bo'lingan yozuvlarni (a.h.m.o.q) ham aniqlaydi.
 
@@ -23,7 +25,7 @@ Maxfiy sozlamalar fayllarini namunadan nusxa ko'chirib yarating. Bu fayllar `.gi
 
 ```bash
 cp bot_config.example.json bot_config.json          # BotFather tokeni
-cp userbot_config.example.json userbot_config.json  # api_id, api_hash, gemini_api_key
+cp userbot_config.example.json userbot_config.json  # api_id, api_hash, AI kalitlari
 ```
 
 ## Ishga tushirish
@@ -33,7 +35,9 @@ python bot.py        # guruh boti
 python userbot.py    # birinchi marta telefon raqam va kodni so'raydi
 ```
 
-Windows'da `run.bat` va `run_userbot.bat` fayllarini ishlatish mumkin. Userbot'ni oynasiz, fonda ishga tushirish uchun `start_userbot_hidden.vbs` ni bosing.
+Windows'da `run.bat` va `run_userbot.bat` fayllarini ishlatish mumkin.
+
+Kompyuter yoqilganda ikkala bot o'zi, oynasiz ishga tushishi uchun `autostart_on.bat` ni bosing. O'chirish uchun `autostart_off.bat` ni bosing. Loglar `bot.log` va `userbot.log` fayllarida saqlanadi.
 
 ## VPS'ga joylash (Ubuntu/Debian)
 

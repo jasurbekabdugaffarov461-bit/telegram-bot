@@ -5,6 +5,12 @@ import logging
 import subprocess
 from datetime import datetime, timedelta, timezone
 
+# Oynasiz (pythonw) ishlaganda chiqishlarni bot.log fayliga yozish
+if sys.stdout is None or sys.stderr is None:
+    _log = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot.log"),
+                "a", encoding="utf-8", buffering=1)
+    sys.stdout = sys.stderr = _log
+
 # Kutubxona o'rnatilmagan bo'lsa — avtomatik o'rnatadi
 try:
     import telegram  # noqa: F401

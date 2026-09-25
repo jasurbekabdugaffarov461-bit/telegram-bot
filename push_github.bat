@@ -24,7 +24,7 @@ echo.
 echo --- GitHub'ga yuklanadigan fayllar (maxfiy fayllar YO'Q bo'lishi kerak) ---
 git status --short
 echo.
-git commit -m "Telegram bot: guruh moderatori, AI userbot, haqorat filtri, VPS deploy"
+git commit -m "Yangilanish: AI zaxira xizmatlari, bitta javob, autostart"
 echo.
 echo GitHub login oynasi ochilishi mumkin - brauzerda tasdiqlang.
 git push -u origin main
