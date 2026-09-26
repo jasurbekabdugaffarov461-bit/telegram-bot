@@ -104,6 +104,8 @@ IMPORTANT_WORDS = [                        # shu so'zlar bo'lsa — sizga darhol
 ALERT_COOLDOWN_MIN = 10
 VOICE_MAX_MB = 20
 IMAGE_MAX_MB = 10
+VIDEO_MAX_MB = 20
+VIDEO_MAX_SEC = 90         # shundan uzun oddiy videolar tahlil qilinmaydi
 
 def load_biznes():
     """biznes.txt dagi ma'lumot (bo'sh yoki namuna bo'lsa — None)."""
@@ -471,20 +473,27 @@ async def ask_ai(user_id, sender_name, text, images=None):
     if ai is None and not PROVIDERS:
         return None
     hist = history[user_id]
-    shown = text if not images else f"[📷 {len(images)} ta rasm yubordi] {text}".strip()
+    has_video = any(m.startswith("video/") for _, m in (images or []))
+    shown = text if not images else (text if has_video else f"[📷 {len(images)} ta rasm yubordi] {text}".strip())
     hist.append(types.Content(role="user", parts=[types.Part(text=shown)]))
     system = system_prompt(sender_name)
 
     answer = None
     if images and ai:
         parts = [types.Part(text=text or "Bu rasmda nima bor? Qisqa javob ber.")]
+        if has_video:
+            parts[0] = types.Part(text=text + "\n(Videoni ko'rib, undagi narsalarni va aytilgan gapni hisobga olib javob ber.)")
         parts += [types.Part.from_bytes(data=b, mime_type=m) for b, m in images]
         contents = list(hist)[:-1] + [types.Content(role="user", parts=parts)]
         answer = await ask_gemini(contents, system)
     if not answer and images:
         # rasmni ko'ra oladigan model ishlamadi -> matnli zaxira, rasmni ko'rmasligini aytamiz
-        note = system + "\nSuhbatdosh rasm yubordi, lekin sen hozir rasmni ko'ra olmaysan. " \
-                        f"Buni xushmuomalalik bilan ayt va {OWNER_NAME}ga yetkazishingni bildir."
+        if has_video:   # videoni ko'ra olmasak ham, ovozi matnga aylantirilgan — shunga javob beramiz
+            note = system + "\nSuhbatdosh video yubordi. Sen videoni ko'ra olmaysan, faqat undagi gapning " \
+                            "matni berilgan — shunga javob ber."
+        else:
+            note = system + "\nSuhbatdosh rasm yubordi, lekin sen hozir rasmni ko'ra olmaysan. " \
+                            f"Buni xushmuomalalik bilan ayt va {OWNER_NAME}ga yetkazishingni bildir."
         answer = await ask_backup(note, hist)
     if not answer and not images:
         answer = await ask_gemini(list(hist), system) or await ask_backup(system, hist)
@@ -707,6 +716,12 @@ async def handle_command(event, cmd):
     log(f"Buyruq: /ai {cmd} (chat {chat_id}) -> {status}")
 
 
+def _video_ok(event):
+    """Oddiy video: faqat qisqa (<= VIDEO_MAX_SEC) bo'lsa."""
+    dur = getattr(event.file, "duration", None) if event.file else None
+    return dur is not None and dur <= VIDEO_MAX_SEC
+
+
 def _is_image(event):
     if event.photo:
         return True
@@ -724,15 +739,32 @@ async def on_private_message(event):
     raw = (event.raw_text or "").strip()
     kind, image = "text", None
 
-    # --- Ovozli xabar / dumaloq video / audio ---
-    if event.voice or event.video_note or (event.audio and not raw):
+    # --- Dumaloq video / qisqa video: ovoz (Whisper) + tasvir (Gemini) ---
+    if event.video_note or (event.video and not event.gif and _video_ok(event)):
+        kind = "video"
+        size = (event.file.size or 0) if event.file else 0
+        text = data = None
+        if size <= VIDEO_MAX_MB * 1024 * 1024:
+            try:
+                data = await event.download_media(file=bytes)
+                text = await transcribe(data, "video.mp4")
+            except Exception as e:
+                log(f"Videoni yuklab bo'lmadi: {e}")
+        if data:
+            image = (data, "video/mp4")          # Gemini videoni "ko'radi"
+        label = "[Dumaloq video]" if event.video_note else "[Video]"
+        raw = (f"{label} ovozi: {text}" if text else f"{label} (gapirilmagan yoki ovozi tushunilmadi)") \
+              + (f"\nIzoh: {raw}" if raw else "")
+
+    # --- Ovozli xabar / audio ---
+    elif event.voice or (event.audio and not raw):
         kind = "voice"
         size = (event.file.size or 0) if event.file else 0
         text = None
         if size <= VOICE_MAX_MB * 1024 * 1024:
             try:
                 data = await event.download_media(file=bytes)
-                text = await transcribe(data, "voice.mp4" if event.video_note else "voice.ogg")
+                text = await transcribe(data, "voice.ogg")
             except Exception as e:
                 log(f"Ovozni yuklab bo'lmadi: {e}")
         if not text:
@@ -759,8 +791,9 @@ async def on_private_message(event):
     if not raw and not image:
         return
 
-    log(f"{name}: {'[📷 rasm] ' if kind == 'image' else ''}{raw}")
-    add_daylog(sender.id, name, username, ("[📷 rasm] " if kind == "image" else "") + raw, kind)
+    tag = "[📷 rasm] " if kind == "image" else ""
+    log(f"{name}: {tag}{raw}")
+    add_daylog(sender.id, name, username, tag + raw, kind)
 
     # 0) Bu chat uchun bot o'chirilgan bo'lsa — javob bermaydi (lekin muhim xabar signali ishlaydi)
     await maybe_alert(sender.id, name, username, raw)
