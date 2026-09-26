@@ -1,4 +1,5 @@
 # Maxfiy fayllar — HECH QACHON GitHub'ga yuklanmaydi
+.env
 bot_config.json
 userbot_config.json
 *.session
@@ -11,3 +12,11 @@ __pycache__/
 *.pyc
 venv/
 .venv/
+
+# VPS paketi (maxfiy kalitlar bor)
+vps_paket/
+vps_paket.zip
+
+# Shaxsiy ma'lumotlar
+kunlik_log.json
+biznes.txt

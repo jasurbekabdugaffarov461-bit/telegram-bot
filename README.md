@@ -21,7 +21,13 @@ Ikki qismdan iborat Telegram loyiha:
 pip install -r requirements.txt telethon google-genai
 ```
 
-Maxfiy sozlamalar fayllarini namunadan nusxa ko'chirib yarating. Bu fayllar `.gitignore` da, shuning uchun GitHub'ga yuklanmaydi.
+Barcha kalitlar bitta `.env` faylida saqlanadi (namuna: `.env.example`). `.env` dagi qiymatlar `*_config.json` fayllaridagilardan ustun turadi.
+
+```bash
+cp .env.example .env   # va kalitlarni to'ldiring
+```
+
+Muqobil ravishda JSON sozlamalar fayllarini namunadan nusxa ko'chirib yaratish mumkin. Bu fayllar `.gitignore` da, shuning uchun GitHub'ga yuklanmaydi.
 
 ```bash
 cp bot_config.example.json bot_config.json          # BotFather tokeni

@@ -34,8 +34,30 @@ from telegram.ext import (
 # BOT TOKEN
 # ==============================
 # Token kodda SAQLANMAYDI (GitHub'ga chiqib ketmasligi uchun).
-# Avval BOT_TOKEN muhit o'zgaruvchisidan, bo'lmasa bot_config.json faylidan o'qiladi:
+# Tartib: muhit o'zgaruvchisi -> .env fayli (BOT_TOKEN=...) -> bot_config.json:
 #   {"bot_token": "123456:ABC..."}
+
+def _load_dotenv(path):
+    """.env faylidagi KALIT=qiymat qatorlarini muhit o'zgaruvchilariga yuklaydi."""
+    if not os.path.exists(path):
+        return
+    with open(path, encoding="utf-8-sig") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            v = v.strip()
+            if v[:1] in "\"'" and v[-1:] == v[:1] and len(v) > 1:
+                v = v[1:-1]
+            else:
+                v = v.split(" #")[0].strip()
+            if v:
+                os.environ.setdefault(k.strip(), v)
+
+
+_load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+
 
 def _load_token():
     token = os.getenv("BOT_TOKEN")
@@ -241,5 +263,30 @@ def main():
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
+def _keep_awake():
+    """Windows: bot ishlab turgan paytda kompyuter uyqu rejimiga o'tmasin
+    (sozlamalarni o'zgartirmaydi — dastur yopilsa, odatiy holat qaytadi)."""
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            ES_CONTINUOUS, ES_SYSTEM_REQUIRED = 0x80000000, 0x00000001
+            ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)
+        except Exception:
+            pass
+
+
 if __name__ == "__main__":
-    main()
+    # Internet bo'lmasa yoki ulanish uzilsa — 20 soniyadan keyin qayta urinadi
+    import time as _t
+    import asyncio as _aio
+    _keep_awake()
+    while True:
+        try:
+            _aio.set_event_loop(_aio.new_event_loop())   # har urinishda yangi event loop
+            main()
+            break                      # normal to'xtatildi (Ctrl+C)
+        except KeyboardInterrupt:
+            break
+        except Exception as _e:
+            print(f"[{_t.strftime('%Y-%m-%d %H:%M:%S')}] Xato: {_e!r} — 20 soniyadan keyin qayta urinaman", flush=True)
+            _t.sleep(20)

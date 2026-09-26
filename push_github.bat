@@ -24,7 +24,7 @@ echo.
 echo --- GitHub'ga yuklanadigan fayllar (maxfiy fayllar YO'Q bo'lishi kerak) ---
 git status --short
 echo.
-git commit -m "Yangilanish: AI zaxira xizmatlari, bitta javob, autostart"
+git commit -m "Yangilanish: ovozli xabar, rasm, kunlik hisobot, muhim xabar signali, buyurtmalar, Cloudflare va Cohere"
 echo.
 echo GitHub login oynasi ochilishi mumkin - brauzerda tasdiqlang.
 git push -u origin main
