@@ -296,9 +296,14 @@ async def discover_models():
                 x in name for x in ("image", "tts", "audio", "live", "embed", "native")
             ):
                 found.append(name)
-        # asosiy model birinchi, keyin "lite" (odatda alohida limit), keyin qolganlari
-        found.sort(key=lambda n: (0 if "lite" in n else 1, "preview" in n, n))
-        models = models[:1] + [n for n in found if n not in models[:1]][:4]
+        # Tartib: asosiy model -> sifatli "Flash" (3.x, yangisi oldin) -> "Flash Lite" (katta limit)
+        # 2.x modellar yangi foydalanuvchilar uchun yopilgan — ularni tashlab ketamiz
+        def ver(n):
+            m = re.search(r"(\d+(?:\.\d+)?)", n)
+            return float(m.group(1)) if m else 0.0
+        found = [n for n in found if ver(n) >= 3 or "latest" in n]
+        found.sort(key=lambda n: ("lite" in n, "preview" in n, "latest" in n, -ver(n)))
+        models = models[:1] + [n for n in found if n not in models[:1]][:8]
         log(f"Modellar: {', '.join(models)}")
     except Exception as e:
         log(f"Modellar ro'yxatini olib bo'lmadi: {str(e)[:150]}")
@@ -462,8 +467,17 @@ async def ask_gemini(contents, system):
                     continue
                 if code == "503":                     # band -> 2 daqiqa boshqa modelga o'tamiz
                     model_cooldown[model] = time.time() + 120
-                if code == "429":                     # limit tugadi -> 10 daqiqa dam oladi
-                    model_cooldown[model] = time.time() + 600
+                if code == "429":
+                    if "PerDay" in msg or "per day" in msg.lower():
+                        # kunlik limit tugadi -> limit yangilanguncha (07:00 UTC ≈ 12:00 Toshkent) ishlatmaymiz
+                        now = datetime.now(timezone.utc)
+                        reset = now.replace(hour=7, minute=5, second=0, microsecond=0)
+                        if reset <= now:
+                            reset += timedelta(days=1)
+                        model_cooldown[model] = reset.timestamp()
+                        log(f"  {model}: kunlik limit tugadi, {reset.astimezone(TZ):%H:%M} gacha ishlatilmaydi")
+                    else:                             # daqiqalik limit -> 1 daqiqa dam oladi
+                        model_cooldown[model] = time.time() + 60
                 elif code == "404":                   # model yo'q -> ro'yxatdan chiqaramiz
                     models = [m for m in models if m != model] or models
                 break
@@ -632,6 +646,19 @@ async def build_report():
     return head + "\n".join(lines)
 
 
+def media_stats():
+    """Bugungi xabarlar turi bo'yicha statistika (/ai status uchun)."""
+    e = _today_entries()
+    def n(kind):
+        return sum(1 for x in e if x["kind"] == kind)
+    voice_fail = sum(1 for x in e if x["kind"] == "voice" and "aylantirilmadi" in x["text"])
+    return (f"Bugun kelgan: 💬 {n('text')} matn | 🎤 {n('voice')} ovozli"
+            f"{f' ({voice_fail} tasi tushunilmadi)' if voice_fail else ''} | 🎥 {n('video')} video"
+            f" | 📷 {n('image')} rasm | 📥 {n('order')} buyurtma\n"
+            f"Ovoz→matn: {'✅ Groq Whisper' if cfg.get('groq_api_key') else '❌ Groq kaliti yo`q'}"
+            f" | Video/rasm: {'✅ Gemini' if ai else '❌ Gemini kaliti yo`q'}")
+
+
 async def send_long(chat, text):
     for i in range(0, len(text), 4000):
         await client.send_message(chat, text[i:i + 4000])
@@ -702,6 +729,7 @@ async def handle_command(event, cmd):
             f"Modellar: {', '.join(models)}\n"
             f"Zaxira: {', '.join(p['name'] + '(' + str(len(p['models'])) + ')' for p in PROVIDERS) or 'yo`q'}\n"
             f"Oxirgi xato: {stats['last_error'] or '-'}\n"
+            f"{media_stats()}\n"
             f"Biznes ma'lumoti: {'✅ bor' if load_biznes() else '❌ biznes.txt bo`sh'}\n"
             f"Kunlik hisobot: har kuni {REPORT_HOUR}:00 (hozir olish: /ai hisobot)"
         )
