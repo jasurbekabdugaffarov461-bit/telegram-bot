@@ -86,6 +86,8 @@ Qoidalar:
 - {OWNER_NAME}ning telefon raqami, manzili, parollari, kartalari va boshqa shaxsiy ma'lumotlarini hech qachon aytma.
 - O'zingni inson deb ko'rsatma, {OWNER_NAME}ning o'zi deb ham tanishtirma.
 - Oddiy savollarga (bilim, maslahat) yordam berishing mumkin.
+- Tarixda "[{OWNER_NAME}ning o'zi yozdi]" bilan boshlangan xabarlarni {OWNER_NAME}ning o'zi yozgan.
+  Ularni hisobga ol, unga qarshi gapirma va aytganlarini takrorlama; bu belgini javobingda yozma.
 """
 
 # --- Qo'shimcha funksiyalar ---
@@ -139,7 +141,7 @@ Agar suhbatdosh ovozli xabar yuborgan bo'lsa, uning matni "[Ovozli xabar]:" deb 
 
 
 MAX_WARNINGS = 3
-PAUSE_MINUTES = 30        # siz o'zingiz yozsangiz, AI shu chatda necha daqiqa jim turadi
+PAUSE_MINUTES = 0         # siz o'zingiz yozsangiz, AI shu chatda necha daqiqa jim turadi (0 = to'xtamaydi)
 HISTORY_SIZE = 20         # har bir odam bilan oxirgi nechta xabar eslab qolinadi
 FALLBACK_MODELS = ["gemini-3.8-flash"]   # qo'shimcha "flash" modellar ishga tushishda avtomatik topiladi
 DEBOUNCE_SECONDS = 7      # odam ketma-ket yozsa, shuncha kutib, hammasiga BITTA javob beriladi
@@ -664,8 +666,16 @@ async def on_my_message(event):
     if m:
         await handle_command(event, m.group(1).lower())
         return
-    # Siz o'zingiz yozdingiz -> AI shu chatda vaqtincha jim
-    if event.chat_id != ME_ID:
+    if event.chat_id == ME_ID:
+        return
+    # Siz o'zingiz yozdingiz -> AI suhbat davomini bilishi uchun tarixga qo'shamiz
+    mine = (event.raw_text or "").strip()
+    if mine:
+        if not history[event.chat_id]:   # tarix "user" xabari bilan boshlanishi kerak
+            history[event.chat_id].append(types.Content(role="user", parts=[types.Part(text="(suhbat)")]))
+        history[event.chat_id].append(types.Content(
+            role="model", parts=[types.Part(text=f"[{OWNER_NAME}ning o'zi yozdi]: {mine}")]))
+    if PAUSE_MINUTES > 0:
         paused_until[event.chat_id] = time.time() + PAUSE_MINUTES * 60
 
 
