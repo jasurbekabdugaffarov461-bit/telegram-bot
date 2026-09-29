@@ -19,6 +19,9 @@ except ImportError:
     subprocess.check_call([sys.executable, "-m", "pip", "install", "python-telegram-bot>=22.0"])
 
 from bad_words import contains_bad_word
+import ai_core
+from collections import defaultdict, deque
+import time as _time
 from telegram import Update, ChatPermissions
 from telegram.constants import ChatType
 from telegram.error import TelegramError
@@ -200,6 +203,91 @@ async def punish(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # XABAR QABUL QILISH
 # ==============================
 
+# ==============================
+# GURUHDA AI (faqat reply yoki bot nomi aytilganda)
+# ==============================
+
+OWNER_NAME = "Muhammad Ali"
+AI_OFFER = (f"Siz ham Telegram akkauntingizga AI ulab qo'ymoqchi bo'lsangiz, {OWNER_NAME}ga yozing. "
+            "Narxi — 39 000 so'm.")
+EXTRA_TRIGGERS = ["bot", "botjon"]   # xabar shu so'z bilan BOSHLANSA ham javob beradi ("bot, bugun nima kun?")
+GROUP_HISTORY = 20
+USER_LIMIT_PER_MIN = 6               # bitta odam daqiqasiga nechta AI savol bera oladi
+
+group_history = defaultdict(lambda: deque(maxlen=GROUP_HISTORY))   # chat_id -> [(role, matn)]
+user_hits = defaultdict(deque)                                      # user_id -> vaqtlar
+BOT_USERNAME = ""
+BOT_NAME = ""
+
+
+def group_system(chat_title):
+    return f"""Sen Telegram guruhidagi AI yordamchi botsan ("{BOT_NAME}", @{BOT_USERNAME}).
+Seni {OWNER_NAME} yaratgan. Guruh nomi: "{chat_title}".
+Qoidalar:
+- Qisqa va aniq javob ber (1–4 gap). Savol qaysi tilda bo'lsa (o'zbek, rus, ingliz), shu tilda javob ber.
+- Suhbat tarixida xabarlar "Ism: matn" ko'rinishida — kim nima deganini hisobga ol.
+- Hurmat bilan yoz. Haqorat, siyosiy bahs va shaxsiy ma'lumotlarga aralashma.
+- "Sen kimsan?", "AI misan?", "bot misan?" desa: "Men {OWNER_NAME} yaratgan AI botman." deb javob ber
+  va shu taklifni qo'sh: "{AI_OFFER}"
+- Javobni "{BOT_NAME}:" deb boshlama."""
+
+
+def _is_triggered(message) -> bool:
+    """Botga reply qilingan yoki bot nomi / @username aytilgan bo'lsa True."""
+    if message.chat.type == ChatType.PRIVATE:
+        return True
+    r = message.reply_to_message
+    if r and r.from_user and r.from_user.username and r.from_user.username.lower() == BOT_USERNAME.lower():
+        return True
+    t = (message.text or message.caption or "").lower()
+    if BOT_USERNAME and f"@{BOT_USERNAME.lower()}" in t:
+        return True
+    names = [BOT_USERNAME.lower(), BOT_NAME.lower()]
+    if any(n and re.search(rf"(?<!\w){re.escape(n)}(?!\w)", t) for n in names):
+        return True
+    # "bot, ..." kabi murojaat — faqat xabar boshida bo'lsa (oddiy gapdagi "bot" so'ziga javob bermaydi)
+    return any(re.match(rf"\s*{re.escape(w.lower())}\b[\s,!:?.-]", t + " ") for w in EXTRA_TRIGGERS)
+
+
+def _rate_ok(user_id) -> bool:
+    q = user_hits[user_id]
+    now = _time.time()
+    while q and now - q[0] > 60:
+        q.popleft()
+    if len(q) >= USER_LIMIT_PER_MIN:
+        return False
+    q.append(now)
+    return True
+
+
+async def ai_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """AI javob beradi. Javob berilsa True."""
+    message = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+    if not ai_core.enabled() or not _rate_ok(user.id):
+        return False
+    text = message.text or message.caption or ""
+    if BOT_USERNAME:
+        text = re.sub(rf"@{re.escape(BOT_USERNAME)}", "", text, flags=re.I).strip() or text
+    hist = group_history[chat.id]
+    r = message.reply_to_message
+    if r and (r.text or r.caption) and not (r.from_user and r.from_user.username
+                                             and r.from_user.username.lower() == BOT_USERNAME.lower()):
+        # boshqa odamning xabariga reply qilib botni chaqirsa — o'sha xabarni ham kontekstga qo'shamiz
+        hist.append(("user", f"{r.from_user.first_name if r.from_user else '?'}: {(r.text or r.caption)[:800]}"))
+    hist.append(("user", f"{user.first_name}: {text[:1500]}"))
+    await context.bot.send_chat_action(chat.id, "typing")
+    answer = await ai_core.complete(group_system(chat.title or "shaxsiy chat"), list(hist))
+    if not answer:
+        hist.pop()
+        return False
+    hist.append(("assistant", answer))
+    await message.reply_text(answer[:4000])
+    log.info("  -> AI javob: %s", answer[:150])
+    return True
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.effective_message
     if not message or not message.text or not update.effective_user:
@@ -214,12 +302,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await punish(update, context)
         return
 
-    # 2) SALOM
+    # 2) AI — faqat botga reply qilinganda yoki bot nomi aytilganda
+    if _is_triggered(message):
+        if await ai_reply(update, context):
+            return
+
+    # 3) SALOM
     if matches(text, GREETING_RE):
         await message.reply_text("Assalomu alaykum! Yaxshimisiz?")
         return
 
-    # 3) XAYR
+    # 4) XAYR
     if matches(text, FAREWELL_RE):
         await message.reply_text("Mayli, yaxshi dam oling! 😊")
         return
@@ -245,10 +338,14 @@ def main():
         raise SystemExit('BOT_TOKEN topilmadi! bot_config.json yarating: {"bot_token": "..."}')
 
     async def post_init(application):
+        global BOT_USERNAME, BOT_NAME
         me = await application.bot.get_me()
+        BOT_USERNAME, BOT_NAME = me.username or "", me.first_name or ""
+        ai_core.set_logger(lambda m: log.info(m))
+        await ai_core.discover()
         print(f"Bot: @{me.username}  (Telegram'da shu botga yozing)")
 
-    app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
+    app = Application.builder().token(BOT_TOKEN).post_init(post_init).concurrent_updates(True).build()  # bir vaqtda ko'p odamga javob
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(
@@ -279,6 +376,14 @@ if __name__ == "__main__":
     # Internet bo'lmasa yoki ulanish uzilsa — 20 soniyadan keyin qayta urinadi
     import time as _t
     import asyncio as _aio
+    # Bitta nusxa: ikkinchi nusxa ishga tushsa darhol chiqib ketadi (Conflict / database is locked bo'lmasin)
+    import socket as _so
+    _lock = _so.socket(_so.AF_INET, _so.SOCK_STREAM)
+    try:
+        _lock.bind(("127.0.0.1", 47651))
+    except OSError:
+        print("Bu dastur allaqachon ishlayapti — ikkinchi nusxa yopildi.", flush=True)
+        raise SystemExit(0)
     _keep_awake()
     while True:
         try:

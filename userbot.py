@@ -32,6 +32,7 @@ import sys
 import json
 import time
 import asyncio
+import io
 import subprocess
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict, deque
@@ -55,6 +56,19 @@ def _ensure(module, package):
 _ensure("telethon", "telethon")
 _ensure("google.genai", "google-genai")
 
+
+def _try_ensure(module, package):
+    try:
+        _ensure(module, package)
+        return True
+    except Exception as e:
+        print(f"{package} o'rnatilmadi: {e}")
+        return False
+
+
+HAS_TTS = _try_ensure("edge_tts", "edge-tts")                    # ovozli javob (bepul, kalitsiz)
+HAS_FFMPEG = HAS_TTS and _try_ensure("imageio_ffmpeg", "imageio-ffmpeg")   # mp3 -> telegram ovoz formati
+
 from telethon import TelegramClient, events  # noqa: E402
 from google import genai                     # noqa: E402
 from google.genai import types               # noqa: E402
@@ -71,12 +85,17 @@ SESSION_FILE = os.path.join(BASE, "my_account")
 # ==============================
 
 OWNER_NAME = "Muhammad Ali"
+AI_OFFER_PRICE = "39 000 so'm"
+AI_OFFER = (f"Siz ham {OWNER_NAME}dek Telegram akkauntingizga AI ulab qo'ymoqchi bo'lsangiz, "
+            f"{OWNER_NAME}ga yetkazaman. Narxi — {AI_OFFER_PRICE}.")
+OFFER_REPEAT_DAYS = 30     # so'ramasa ham taklif: bir odamga shuncha kunda bir marta
 
 SYSTEM_PROMPT = f"""Sen {OWNER_NAME}ning shaxsiy AI yordamchisisan.
 {OWNER_NAME} hozir band. Sen uning Telegram lichkasiga kelgan xabarlarga uning o'rniga javob berasan.
 
 Qoidalar:
-- "Kimsan?", "sen kimsan?", "bu kim?" kabi savollarga: "Men {OWNER_NAME}ning shaxsiy AI yordamchisiman." deb javob ber.
+- "Kimsan?", "sen AI misan?", "bot misan?", "bu kim?" kabi savollarga: "Men {OWNER_NAME}ning shaxsiy AI yordamchisiman." deb javob ber
+  va DOIM shu taklifni qo'sh: "{AI_OFFER}"
 - Salom berishsa: "Assalomu alaykum! Yaxshimisiz?" uslubida samimiy javob qaytar.
 - Xayrlashishsa: "Mayli, yaxshi dam oling!" uslubida javob ber.
 - Suhbatdosh qaysi tilda yozsa (o'zbek, rus, ingliz), o'sha tilda javob ber.
@@ -104,10 +123,41 @@ IMPORTANT_WORDS = [                        # shu so'zlar bo'lsa — sizga darhol
     "buyurtma", "zakaz", "заказ", "narxi", "qancha turadi", "сколько стоит",
 ]
 ALERT_COOLDOWN_MIN = 10
+PAYMENT_WORDS = [                          # to'lov xabarlari — kutishsiz, har safar signal
+    "tashladim", "tashlab qo'ydim", "tashlab qoydim", "to'ladim", "toladim", "to'lab qo'ydim",
+    "o'tkazdim", "otkazdim", "o'tkazib qo'ydim", "chek", "kvitansiya",
+    "оплатил", "оплатила", "перевел", "перевёл", "перевела", "скинул", "скинула", "чек",
+    "paid", "i sent the money",
+]
 VOICE_MAX_MB = 20
 IMAGE_MAX_MB = 10
 VIDEO_MAX_MB = 20
 VIDEO_MAX_SEC = 90         # shundan uzun oddiy videolar tahlil qilinmaydi
+
+HISTORY_FILE = os.path.join(BASE, "suhbatlar.json")      # har bir odam bilan suhbat (o'chib-yonsa ham eslaydi)
+ORDERS_FILE = os.path.join(BASE, "buyurtmalar.json")     # buyurtmalar ro'yxati
+
+VOICE_REPLY = True                 # ovozli xabarga ovozli javob
+VOICE_UZ = "uz-UZ-SardorNeural"    # ayol ovozi kerak bo'lsa: "uz-UZ-MadinaNeural"
+VOICE_RU = "ru-RU-DmitryNeural"
+VOICE_EN = "en-US-GuyNeural"
+VOICE_MAX_CHARS = 700              # bundan uzun javob matn bilan yuboriladi
+
+# --- Spam / firibgarlik ---
+SPAM_HARD = [                      # shular bo'lsa — javob berilmaydi
+    "yutib oldingiz", "yutuq oldingiz", "yutuqni oling", "g'olib bo'ldingiz", "sovrin yutdingiz",
+    "tekin premium", "bepul premium", "premium sovg'a", "sms kod", "smsdagi kod", "kelgan kodni",
+    "kodni ayting", "kodni yuboring", "karta raqamingiz", "cvv", "1xbet", "mostbet", "kazino", "casino",
+    "выиграли", "вы победили", "ваш приз", "код из смс", "пришел код", "пришёл код", "казино",
+    "you won", "you have won", "claim your prize",
+]
+SPAM_SOFT = [                      # havola bilan birga kelsa — spam
+    "ovoz ber", "golos", "airdrop", "kripto", "crypto", "invest", "daromad", "pul ishla", "ish taklif",
+    "uydan turib", "bonus", "sovg'a", "yutuq", "stavka", "подарок", "заработ", "инвест", "голос",
+    "ставк", "бонус", "free", "giveaway", "prize", "earn",
+]
+DANGER_EXT = (".apk", ".exe", ".scr", ".bat", ".cmd", ".msi", ".vbs", ".jar", ".js", ".ps1")
+LINK_RE = re.compile(r"(https?://|www\.|t\.me/|telegram\.me/|bit\.ly|tinyurl|goo\.gl)", re.I)
 
 def load_biznes():
     """biznes.txt dagi ma'lumot (bo'sh yoki namuna bo'lsa — None)."""
@@ -120,8 +170,12 @@ def load_biznes():
         return None
 
 
-def system_prompt(sender_name=None):
+def system_prompt(sender_name=None, offer=False, user_id=None):
     p = SYSTEM_PROMPT
+    if offer:
+        p += f"""
+Bu odamga hali AI ulash xizmati taklif qilinmagan. Javobingning oxirida, tabiiy tarzda, bir marta shu taklifni qo'sh:
+"{AI_OFFER}" (suhbat mavzusiga qarab so'zlarini biroz moslashtirishing mumkin, narxni o'zgartirma)."""
     biz = load_biznes()
     if biz:
         p += f"""
@@ -135,6 +189,21 @@ ENG OXIRIDA alohida qatorda shunday yoz:  #BUYURTMA: <buyurtmaning qisqa xulosas
 (bu qator mijozga ko'rsatilmaydi, faqat {OWNER_NAME}ga yuboriladi)."""
     p += """
 Agar suhbatdosh ovozli xabar yuborgan bo'lsa, uning matni "[Ovozli xabar]:" deb beriladi — oddiy xabar kabi javob ber."""
+    p += f"""
+Agar suhbatdosh to'lov cheki (kvitansiya, o'tkazma skrinshoti) rasmini yuborsa: to'lovni o'zing TASDIQLAMA,
+"{OWNER_NAME}ga yetkazdim, tekshirib tasdiqlaydi" de va javobing ENG OXIRIDA alohida qatorda yoz:
+#CHEK: summa=...; sana=...; vaqt=...; karta=**** (faqat oxirgi 4 raqam); qabul qiluvchi=...; tizim=...
+(rasmda ko'ringanini yoz, ko'rinmaganiga ? qo'y; bu qator mijozga ko'rsatilmaydi)."""
+    b = busy_info()
+    if b:
+        p += f"""
+MUHIM: {OWNER_NAME} hozir {b[0]} — soat {b[1]} dan keyin o'zi javob beradi.
+Suhbat boshida (yoki "qachon javob beradi?" deyishsa) buni albatta ayt."""
+    if user_id:
+        mine = [o for o in orders if o["id"] == user_id][-3:]
+        if mine:
+            p += "\nBu odamning oldingi buyurtmalari (kerak bo'lsa hisobga ol): " + \
+                 "; ".join(f"№{o['n']} {o['summary'][:120]} — holati: {o['status']}" for o in mine)
     if sender_name:
         p += f"\nSuhbatdoshning ismi: {sender_name}."
     return p
@@ -144,7 +213,7 @@ MAX_WARNINGS = 3
 PAUSE_MINUTES = 0         # siz o'zingiz yozsangiz, AI shu chatda necha daqiqa jim turadi (0 = to'xtamaydi)
 HISTORY_SIZE = 20         # har bir odam bilan oxirgi nechta xabar eslab qolinadi
 FALLBACK_MODELS = ["gemini-3.8-flash"]   # qo'shimcha "flash" modellar ishga tushishda avtomatik topiladi
-DEBOUNCE_SECONDS = 7      # odam ketma-ket yozsa, shuncha kutib, hammasiga BITTA javob beriladi
+DEBOUNCE_SECONDS = 1.5      # odam ketma-ket yozsa, shuncha kutib, hammasiga BITTA javob beriladi
 BUSY_REPLY = f"Assalomu alaykum! {OWNER_NAME} hozir band, bo'shagach o'zi javob beradi. 🙏"
 BUSY_REPLY_EVERY_MIN = 30 # "band" xabari bir odamga necha daqiqada bir marta
 
@@ -250,7 +319,15 @@ def load_state():
         st = {}
     st.setdefault("ai_enabled", True)
     st.setdefault("disabled_chats", [])
+    st.setdefault("offered", {})         # user_id -> AI ulash taklif qilingan vaqt
+    st.setdefault("busy_until", 0)       # band rejimi (qachongacha)
+    st.setdefault("busy_reason", "")
     return st
+
+
+def should_offer(user_id):
+    last = state.get("offered", {}).get(str(user_id), 0)
+    return time.time() - last > OFFER_REPEAT_DAYS * 86400
 
 
 def save_state():
@@ -259,10 +336,46 @@ def save_state():
 
 
 state = load_state()
+
+
+def busy_info():
+    """Band rejimi yoqilgan bo'lsa: (sabab, "HH:MM"), aks holda None."""
+    if time.time() < state.get("busy_until", 0):
+        return (state.get("busy_reason") or "band",
+                datetime.fromtimestamp(state["busy_until"], TZ).strftime("%H:%M"))
+    return None
 ME_ID = None
 CMD_RE = re.compile(r"^[/.!]ai\s+(on|off|status|yoq|o'?chir|holat|hisobot|report)\s*$", re.I)
 
 history = defaultdict(lambda: deque(maxlen=HISTORY_SIZE))   # user_id -> xabarlar
+
+
+def load_history():
+    """suhbatlar.json dan oldingi suhbatlarni tiklaydi (kompyuter o'chib-yonsa ham AI eslaydi)."""
+    try:
+        with open(HISTORY_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return
+    for uid, msgs in data.items():
+        h = history[int(uid)]
+        for role, text in msgs[-HISTORY_SIZE:]:
+            h.append(types.Content(role=role, parts=[types.Part(text=text)]))
+
+
+def save_history():
+    try:
+        data = {str(u): [[c.role, c.parts[0].text or ""] for c in h if c.parts]
+                for u, h in history.items() if h}
+        tmp = HISTORY_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+        os.replace(tmp, HISTORY_FILE)
+    except Exception as e:
+        print(f"Suhbatlar saqlanmadi: {e}", flush=True)
+
+
+load_history()
 locks = defaultdict(asyncio.Lock)
 paused_until = {}                                            # chat_id -> vaqt
 warnings = {}                                                # user_id -> soni
@@ -315,6 +428,7 @@ async def discover_models():
 import httpx  # noqa: E402  (google-genai bilan birga o'rnatiladi)
 
 PROVIDERS = []   # [{"name", "url", "key", "models": [...]}]
+FAST_ORDER = ["cerebras", "groq", "cloudflare", "mistral", "openrouter", "nvidia", "cohere"]  # tezligi bo'yicha
 if cfg.get("groq_api_key"):
     PROVIDERS.append({"name": "groq", "url": "https://api.groq.com/openai/v1",
                       "key": cfg["groq_api_key"], "models": []})
@@ -337,6 +451,7 @@ if cfg.get("cloudflare_api_key") and cfg.get("cloudflare_account_id"):
 if cfg.get("cohere_api_key"):   # bepul "Trial" kalit: oyiga ~1000 so'rov — eng oxirgi zaxira
     PROVIDERS.append({"name": "cohere", "url": "https://api.cohere.ai/compatibility/v1",
                       "key": cfg["cohere_api_key"], "models": []})
+PROVIDERS.sort(key=lambda p: FAST_ORDER.index(p["name"]) if p["name"] in FAST_ORDER else 99)
 
 
 async def discover_providers():
@@ -393,7 +508,7 @@ async def discover_providers():
 
 
 async def ask_provider(p, model, messages):
-    async with httpx.AsyncClient(timeout=40) as h:
+    async with httpx.AsyncClient(timeout=20) as h:
         r = await h.post(
             f"{p['url']}/chat/completions",
             headers={"Authorization": f"Bearer {p['key']}",
@@ -441,32 +556,47 @@ async def ask_gemini(contents, system):
     global models
     if ai is None:
         return None
+    global FAST_THINK
+    extra = {}
+    if FAST_THINK:
+        try:
+            extra["thinking_config"] = types.ThinkingConfig(thinking_level="minimal")
+        except Exception:
+            FAST_THINK = False
     config = types.GenerateContentConfig(
         system_instruction=system,
         temperature=0.7,
         automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+        **extra,
     )
     for model in list(models):
         if time.time() < model_cooldown.get(model, 0):
             continue
         for attempt in range(2):                      # 503 bo'lsa 1 marta qayta urinadi
             try:
-                resp = await ai.aio.models.generate_content(model=model, contents=contents, config=config)
+                resp = await asyncio.wait_for(
+                    ai.aio.models.generate_content(model=model, contents=contents, config=config),
+                    timeout=GEMINI_TIMEOUT)
                 answer = (resp.text or "").strip()
                 if answer:
                     count(True)
                     return answer
+                break
+            except asyncio.TimeoutError:
+                log(f"AI sekin ({model}): {GEMINI_TIMEOUT} soniyada javob bermadi — keyingisiga o'tamiz")
+                model_cooldown[model] = time.time() + 120
                 break
             except Exception as e:
                 msg = str(e)
                 code = msg[:3]
                 log(f"AI xatosi ({model}): {msg[:300]}")
                 count(False, f"{model}: {msg[:80]}")
-                if code == "503" and attempt < 1:
-                    await asyncio.sleep(2)
-                    continue
-                if code == "503":                     # band -> 2 daqiqa boshqa modelga o'tamiz
-                    model_cooldown[model] = time.time() + 120
+                if code == "400" and FAST_THINK and "think" in msg.lower():
+                    FAST_THINK = False                # bu model "minimal" ni bilmaydi -> oddiy rejimga
+                    log("  (tez rejim qo'llanmadi — oddiy rejimda davom etamiz)")
+                    return await ask_gemini(contents, system)
+                if code == "503":                     # band -> kutmasdan keyingi modelga, 5 daqiqa chetlab turamiz
+                    model_cooldown[model] = time.time() + 300
                 if code == "429":
                     if "PerDay" in msg or "per day" in msg.lower():
                         # kunlik limit tugadi -> limit yangilanguncha (07:00 UTC ≈ 12:00 Toshkent) ishlatmaymiz
@@ -484,7 +614,34 @@ async def ask_gemini(contents, system):
     return None
 
 
-async def ask_ai(user_id, sender_name, text, images=None):
+FAST_THINK = True        # Gemini uzoq "o'ylamasin" — javob 2-3 barobar tezroq
+GEMINI_TIMEOUT = 12      # bitta Gemini modeli shuncha soniyada javob bermasa — keyingisiga
+RACE_HEAD_START = 3      # Gemini shuncha soniyada javob bermasa — zaxira AI ham parallel ishga tushadi
+
+
+async def race(primary, backup_fn, head=RACE_HEAD_START):
+    """Avval Gemini; u sekinlashsa zaxira ham parallel boshlanadi — qaysi biri oldin javob bersa, o'sha."""
+    tasks = {asyncio.create_task(primary)}
+    try:
+        done, _ = await asyncio.wait(tasks, timeout=head)
+        t1 = next(iter(tasks))
+        if t1.done():
+            return (not t1.exception() and t1.result()) or await backup_fn()
+        tasks.add(asyncio.create_task(backup_fn()))
+        pending = set(tasks)
+        while pending:
+            done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+            for t in done:
+                if not t.exception() and t.result():
+                    return t.result()
+        return None
+    finally:
+        for t in tasks:
+            if not t.done():
+                t.cancel()
+
+
+async def ask_ai(user_id, sender_name, text, images=None, offer=False):
     """Suhbat tarixini hisobga olib javob beradi. images: [(bytes, mime), ...]"""
     if ai is None and not PROVIDERS:
         return None
@@ -492,7 +649,7 @@ async def ask_ai(user_id, sender_name, text, images=None):
     has_video = any(m.startswith("video/") for _, m in (images or []))
     shown = text if not images else (text if has_video else f"[📷 {len(images)} ta rasm yubordi] {text}".strip())
     hist.append(types.Content(role="user", parts=[types.Part(text=shown)]))
-    system = system_prompt(sender_name)
+    system = system_prompt(sender_name, offer, user_id)
 
     answer = None
     if images and ai:
@@ -512,10 +669,11 @@ async def ask_ai(user_id, sender_name, text, images=None):
                             f"Buni xushmuomalalik bilan ayt va {OWNER_NAME}ga yetkazishingni bildir."
         answer = await ask_backup(note, hist)
     if not answer and not images:
-        answer = await ask_gemini(list(hist), system) or await ask_backup(system, hist)
+        answer = await race(ask_gemini(list(hist), system), lambda: ask_backup(system, hist))
 
     if answer:
         hist.append(types.Content(role="model", parts=[types.Part(text=answer)]))
+        save_history()
         return answer
     hist.pop()   # javob olinmadi — savolni tarixdan olib tashlaymiz
     return None
@@ -586,6 +744,13 @@ def is_important(text):
 
 
 async def maybe_alert(user_id, name, username, text):
+    t = normalize(text)
+    pay = next((w for w in PAYMENT_WORDS if normalize(w) in t), None)
+    if pay:
+        await client.send_message("me", f"💰 TO'LOV XABARI («{pay}»)\n👤 {who(name, username, user_id)}\n"
+                                        f"💬 {text[:1500]}\n\n⚠️ Kartangizni tekshiring!")
+        log(f"  -> to'lov signali yuborildi ({pay})")
+        return
     word = is_important(text)
     if not word or time.time() - alert_sent.get(user_id, 0) < ALERT_COOLDOWN_MIN * 60:
         return
@@ -595,19 +760,169 @@ async def maybe_alert(user_id, name, username, text):
 
 
 ORDER_RE = re.compile(r"^\s*#\s*BUYURTMA\s*:?\s*(.*)$", re.I | re.M)
+CHEK_RE = re.compile(r"^\s*#\s*CHEK\s*:?\s*(.*)$", re.I | re.M)
+STATUS_ICON = {"yangi": "🆕", "chek keldi": "🧾", "to'landi": "💰", "bajarildi": "✅", "bekor": "❌"}
+OPEN_STATUSES = ("yangi", "chek keldi", "to'landi")
+
+
+def _load_orders():
+    try:
+        with open(ORDERS_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        # birinchi ishga tushish: kunlik_log.json dagi eski buyurtmalarni ko'chiramiz
+        old = [e for e in daylog if e.get("kind") == "order"]
+        return [{"n": i + 1, "t": e["t"], "id": e["id"], "name": e["name"], "user": e.get("user", ""),
+                 "summary": e["text"].replace("BUYURTMA: ", "", 1), "status": "yangi", "chek": ""}
+                for i, e in enumerate(old)]
+    except Exception:
+        return []
+
+
+orders = _load_orders()
+
+
+def save_orders():
+    try:
+        with open(ORDERS_FILE, "w", encoding="utf-8") as f:
+            json.dump(orders, f, ensure_ascii=False, indent=1)
+    except Exception as e:
+        log(f"Buyurtmalar saqlanmadi: {e}")
+
+
+def fmt_order(o):
+    s = (f"№{o['n']} {STATUS_ICON.get(o['status'], '')} {o['status']} | {o['t'][8:10]}.{o['t'][5:7]} {o['t'][11:]}"
+         f" | {o['name']}" + (f" (@{o['user']})" if o.get("user") else "") + f"\n   📝 {o['summary'][:300]}")
+    if o.get("chek"):
+        s += f"\n   🧾 {o['chek'][:200]}"
+    return s
 
 
 async def extract_order(answer, user_id, name, username):
-    """AI javobidan #BUYURTMA qatorini olib tashlaydi va sizga yuboradi."""
+    """AI javobidan #BUYURTMA qatorini olib tashlaydi, ro'yxatga qo'shadi va sizga yuboradi."""
     m = ORDER_RE.search(answer or "")
     if not m:
         return answer
     summary = m.group(1).strip() or "(tafsilot yo'q)"
     clean = ORDER_RE.sub("", answer).strip()
-    await client.send_message("me", f"📥 YANGI BUYURTMA\n👤 {who(name, username, user_id)}\n📝 {summary}")
-    add_daylog(user_id, name, username, f"BUYURTMA: {summary}", kind="order")
-    log(f"  -> buyurtma yuborildi: {summary[:100]}")
+    n = max((o["n"] for o in orders), default=0) + 1
+    orders.append({"n": n, "t": datetime.now(TZ).strftime("%Y-%m-%d %H:%M"), "id": user_id, "name": name,
+                   "user": username or "", "summary": summary, "status": "yangi", "chek": ""})
+    save_orders()
+    await client.send_message("me", f"📥 YANGI BUYURTMA №{n}\n👤 {who(name, username, user_id)}\n📝 {summary}\n\n"
+                                    f"Belgilash: /ai tolandi {n}  |  /ai bajarildi {n}  |  /ai bekor {n}")
+    add_daylog(user_id, name, username, f"BUYURTMA №{n}: {summary}", kind="order")
+    log(f"  -> buyurtma №{n} yuborildi: {summary[:100]}")
     return clean
+
+
+async def extract_cheque(answer, user_id, name, username, chat_id, img_ids):
+    """AI javobidan #CHEK qatorini olib tashlaydi va chek ma'lumotini (rasmi bilan) sizga yuboradi."""
+    m = CHEK_RE.search(answer or "")
+    if not m:
+        return answer
+    info = m.group(1).strip() or "(o'qib bo'lmadi)"
+    clean = CHEK_RE.sub("", answer).strip()
+    order = next((o for o in reversed(orders) if o["id"] == user_id and o["status"] in ("yangi", "chek keldi")), None)
+    tail = ""
+    if order:
+        order["status"], order["chek"] = "chek keldi", info
+        save_orders()
+        tail = f"\n📥 Buyurtma №{order['n']}: {order['summary'][:150]}\nTasdiqlash: /ai tolandi {order['n']}"
+    await client.send_message("me", f"🧾 TO'LOV CHEKI KELDI\n👤 {who(name, username, user_id)}\n💵 {info}{tail}\n\n"
+                                    f"⚠️ Kartangizga pul tushganini o'zingiz tekshiring!")
+    if img_ids:
+        try:
+            await client.forward_messages("me", img_ids, from_peer=chat_id)
+        except Exception as e:
+            log(f"Chek rasmini yuborib bo'lmadi: {e}")
+    add_daylog(user_id, name, username, f"CHEK: {info}", kind="payment")
+    log(f"  -> chek yuborildi: {info[:100]}")
+    return clean
+
+
+# ==============================
+# SPAM / FIRIBGARLIK
+# ==============================
+
+spam_alert_sent = {}
+
+
+def spam_check(text, filename, sender):
+    """('spam', sabab) — javob berilmaydi; ('link', sabab) — javob beriladi, lekin sizga ogohlantirish; yoki None."""
+    t = normalize(text or "")
+    if filename and filename.lower().endswith(DANGER_EXT):
+        return "spam", f"xavfli fayl: {filename}"
+    hard = next((w for w in SPAM_HARD if normalize(w) in t), None)
+    if hard:
+        return "spam", f"«{hard}»"
+    if LINK_RE.search(t):
+        soft = next((w for w in SPAM_SOFT if normalize(w) in t), None)
+        if soft:
+            return "spam", f"havola + «{soft}»"
+        if not getattr(sender, "contact", False):
+            return "link", "notanish odam havola yubordi"
+    return None
+
+
+# ==============================
+# OVOZLI JAVOB (edge-tts, bepul)
+# ==============================
+
+_EMOJI_RE = re.compile("[\U0001F000-\U0001FAFF\u2600-\u27BF\uFE0F\u200d]+")
+
+
+def _pick_voice(text):
+    if re.search(r"[а-яА-ЯёЁ]", text):
+        return VOICE_UZ if re.search(r"[ўқғҳЎҚҒҲ]", text) else VOICE_RU
+    words = set(re.findall(r"[a-z']+", text.lower()))
+    if len(words & {"the", "you", "is", "are", "and", "what", "hello", "your", "will", "can", "i'm"}) >= 2:
+        return VOICE_EN
+    return VOICE_UZ
+
+
+def _ffmpeg_to_ogg(mp3):
+    import imageio_ffmpeg
+    flags = 0x08000000 if sys.platform == "win32" else 0          # oyna chiqmasin
+    r = subprocess.run([imageio_ffmpeg.get_ffmpeg_exe(), "-hide_banner", "-i", "pipe:0", "-c:a", "libopus",
+                        "-b:a", "32k", "-f", "ogg", "pipe:1"], input=mp3, capture_output=True,
+                       timeout=60, creationflags=flags)
+    if r.returncode != 0 or not r.stdout:
+        return None, 0
+    tm = re.findall(rb"time=(\d+):(\d+):(\d+(?:\.\d+)?)", r.stderr)
+    dur = int(float(tm[-1][0]) * 3600 + float(tm[-1][1]) * 60 + float(tm[-1][2])) if tm else 0
+    return r.stdout, dur
+
+
+async def send_voice(chat_id, text):
+    """Matnni ovozga aylantirib, ovozli xabar qilib yuboradi. Muvaffaqiyatli bo'lsa True."""
+    if not (VOICE_REPLY and HAS_TTS) or len(text) > VOICE_MAX_CHARS:
+        return False
+    clean = _EMOJI_RE.sub("", re.sub(r"[*_`#~]", "", text)).strip()
+    if not clean:
+        return False
+    try:
+        import edge_tts
+        buf = bytearray()
+        async for chunk in edge_tts.Communicate(clean, _pick_voice(clean)).stream():
+            if chunk["type"] == "audio":
+                buf += chunk["data"]
+        if not buf:
+            return False
+        data, name, dur = bytes(buf), "javob.mp3", 0
+        if HAS_FFMPEG:
+            ogg, dur = await asyncio.get_running_loop().run_in_executor(None, _ffmpeg_to_ogg, data)
+            if ogg:
+                data, name = ogg, "javob.ogg"
+        from telethon.tl.types import DocumentAttributeAudio
+        f = io.BytesIO(data)
+        f.name = name
+        await client.send_file(chat_id, f, voice_note=True,
+                               attributes=[DocumentAttributeAudio(duration=dur or max(1, len(clean) // 14), voice=True)])
+        return True
+    except Exception as e:
+        log(f"Ovozli javob xatosi: {str(e)[:200]}")
+        return False
 
 
 # ==============================
@@ -630,7 +945,7 @@ async def build_report():
     for uid, u in by_user.items():
         raw.append(f"=== {u['name']} (@{u['user'] or '-'}), {len(u['msgs'])} ta xabar ===")
         for e in u["msgs"][-15:]:
-            tag = {"voice": "🎤 ", "image": "📷 ", "order": "📥 "}.get(e["kind"], "")
+            tag = {"voice": "🎤 ", "image": "📷 ", "order": "📥 ", "payment": "🧾 ", "spam": "🚫 "}.get(e["kind"], "")
             raw.append(f"{e['t'][11:]} {tag}{e['text'][:300]}")
     prompt = ("Quyida bugun Telegram lichkamga kelgan xabarlar. O'zbek tilida qisqa hisobot yoz:\n"
               "1) Har bir odam — 1 qatorda nima haqida yozgani.\n"
@@ -689,6 +1004,11 @@ client = TelegramClient(SESSION_FILE, cfg["api_id"], cfg["api_hash"])
 @client.on(events.NewMessage(outgoing=True, func=lambda e: e.is_private))
 async def on_my_message(event):
     text = normalize(event.raw_text or "")
+    m = EXT_RE.match(text)
+    if m:
+        parts = (event.raw_text or "").strip().split(None, 2)
+        await handle_ext(event, m.group(1).lower(), parts[2] if len(parts) > 2 else "")
+        return
     m = CMD_RE.match(text)
     if m:
         await handle_command(event, m.group(1).lower())
@@ -702,8 +1022,86 @@ async def on_my_message(event):
             history[event.chat_id].append(types.Content(role="user", parts=[types.Part(text="(suhbat)")]))
         history[event.chat_id].append(types.Content(
             role="model", parts=[types.Part(text=f"[{OWNER_NAME}ning o'zi yozdi]: {mine}")]))
+        save_history()
     if PAUSE_MINUTES > 0:
         paused_until[event.chat_id] = time.time() + PAUSE_MINUTES * 60
+
+
+EXT_RE = re.compile(r"^[/.!]ai\s+(band|bo'?sh|buyurtmalar|buyurtma|to'?landi|bajarildi|bekor|yordam|help)\b", re.I)
+HELP_TEXT = """🤖 Buyruqlar (Saved Messages'da):
+/ai status — holat
+/ai on | /ai off — AI ni yoqish/o'chirish
+/ai hisobot — bugungi hisobot
+/ai band 2 soat uchrashuvdaman — band rejimi (yoki: /ai band 30 daqiqa, /ai band 16:00 darsda)
+/ai bosh — band rejimini o'chirish
+/ai buyurtmalar — ochiq buyurtmalar (/ai buyurtmalar hammasi — barchasi)
+/ai tolandi 3 | /ai bajarildi 3 | /ai bekor 3 — buyurtma holati"""
+
+
+def parse_busy(arg):
+    """'2 soat uchrashuvda' | '30 daqiqa' | '16:00 gacha darsda' -> (timestamp, sabab)."""
+    arg = arg.strip()
+    now = datetime.now(TZ)
+    m = re.match(r"(\d{1,2})[:.](\d{2})\s*(?:gacha|дo|до)?\s*(.*)$", arg, re.I)
+    if m:
+        until = now.replace(hour=int(m.group(1)) % 24, minute=int(m.group(2)) % 60, second=0, microsecond=0)
+        if until <= now:
+            until += timedelta(days=1)
+        return until.timestamp(), m.group(3).strip()
+    m = re.match(r"(\d+(?:[.,]\d+)?)\s*(soat|daqiqa|daq|minut|min|час|мин|hour|h|s|m)\w*\s*(.*)$", arg, re.I)
+    if m:
+        n = float(m.group(1).replace(",", "."))
+        unit = m.group(2).lower()
+        minutes = n if unit.startswith(("daq", "min", "мин", "m")) else n * 60
+        return time.time() + minutes * 60, m.group(3).strip()
+    return time.time() + 3600, arg          # vaqt aytilmasa — 1 soat
+
+
+async def handle_ext(event, cmd, arg):
+    if event.chat_id != ME_ID:
+        try:
+            await event.delete()
+        except Exception:
+            pass
+        await client.send_message("me", "ℹ️ Bu buyruq faqat Saved Messages (Избранное) da ishlaydi.")
+        return
+    cmd = cmd.replace("'", "")
+    if cmd in ("yordam", "help"):
+        await event.reply(HELP_TEXT)
+    elif cmd == "band":
+        if arg.strip().lower() in ("off", "ochir", "o'chir", "yoq"):
+            cmd = "bosh"
+        else:
+            until, reason = parse_busy(arg)
+            state["busy_until"], state["busy_reason"] = until, reason or "band"
+            save_state()
+            b = busy_info()
+            await event.reply(f"⏳ Band rejimi yoqildi: «{b[0]}», soat {b[1]} gacha.\n"
+                              f"AI hammaga shuni aytadi. O'chirish: /ai bosh")
+            log(f"Buyruq: band {b[0]} {b[1]} gacha")
+    if cmd == "bosh":
+        state["busy_until"] = 0
+        save_state()
+        await event.reply("✅ Band rejimi o'chirildi.")
+    elif cmd in ("buyurtmalar", "buyurtma"):
+        show_all = "hamm" in arg.lower() or "barch" in arg.lower()
+        lst = orders if show_all else [o for o in orders if o["status"] in OPEN_STATUSES]
+        if not lst:
+            await event.reply("📥 Ochiq buyurtma yo'q." + ("" if show_all else "\nHammasi: /ai buyurtmalar hammasi"))
+            return
+        head = f"📥 {'Barcha' if show_all else 'Ochiq'} buyurtmalar ({len(lst)} ta):\n\n"
+        await send_long("me", head + "\n\n".join(fmt_order(o) for o in lst[-30:]) +
+                        "\n\nBelgilash: /ai tolandi N | /ai bajarildi N | /ai bekor N")
+    elif cmd in ("tolandi", "bajarildi", "bekor"):
+        m = re.search(r"\d+", arg)
+        o = next((x for x in orders if m and x["n"] == int(m.group())), None)
+        if not o:
+            await event.reply("❗ Buyurtma raqamini yozing, masalan: /ai tolandi 3\nRo'yxat: /ai buyurtmalar")
+            return
+        o["status"] = {"tolandi": "to'landi"}.get(cmd, cmd)
+        save_orders()
+        await event.reply(f"Yangilandi:\n{fmt_order(o)}")
+        log(f"Buyruq: buyurtma №{o['n']} -> {o['status']}")
 
 
 async def handle_command(event, cmd):
@@ -731,7 +1129,11 @@ async def handle_command(event, cmd):
             f"Oxirgi xato: {stats['last_error'] or '-'}\n"
             f"{media_stats()}\n"
             f"Biznes ma'lumoti: {'✅ bor' if load_biznes() else '❌ biznes.txt bo`sh'}\n"
-            f"Kunlik hisobot: har kuni {REPORT_HOUR}:00 (hozir olish: /ai hisobot)"
+            f"Kunlik hisobot: har kuni {REPORT_HOUR}:00 (hozir olish: /ai hisobot)\n"
+            f"Band rejimi: {('⏳ ' + busy_info()[0] + ', ' + busy_info()[1] + ' gacha') if busy_info() else 'yo`q'}\n"
+            f"Ochiq buyurtmalar: {sum(1 for o in orders if o['status'] in OPEN_STATUSES)} ta (/ai buyurtmalar)\n"
+            f"Ovozli javob: {'✅' if VOICE_REPLY and HAS_TTS else '❌'} | Eslab qolingan suhbatlar: {len(history)} ta\n"
+            f"Barcha buyruqlar: /ai yordam"
         )
         log(f"Buyruq: /ai {cmd} (umumiy) -> ai_enabled={state['ai_enabled']}")
         return
@@ -767,6 +1169,20 @@ def _is_image(event):
     return bool(event.document) and mime.startswith("image/") and not event.sticker
 
 
+typing_at = {}   # user_id -> oxirgi "yozmoqda..." vaqti
+
+
+@client.on(events.UserUpdate)
+async def on_user_update(event):
+    try:
+        if event.typing:
+            typing_at[event.user_id] = time.time()
+        elif event.cancel:
+            typing_at.pop(event.user_id, None)
+    except Exception:
+        pass
+
+
 @client.on(events.NewMessage(incoming=True, func=lambda e: e.is_private))
 async def on_private_message(event):
     sender = await event.get_sender()
@@ -776,6 +1192,23 @@ async def on_private_message(event):
     username = getattr(sender, "username", None)
     raw = (event.raw_text or "").strip()
     kind, image = "text", None
+
+    # --- Spam / firibgarlik ---
+    fname = (getattr(event.file, "name", None) or "") if event.file else ""
+    sp = spam_check(raw, fname, sender)
+    if sp and sp[0] == "spam":
+        log(f"{name}: 🚫 SPAM ({sp[1]}): {raw[:150]}")
+        add_daylog(sender.id, name, username, f"[SPAM: {sp[1]}] {raw}", "spam")
+        if time.time() - spam_alert_sent.get(sender.id, 0) > ALERT_COOLDOWN_MIN * 60:
+            spam_alert_sent[sender.id] = time.time()
+            await client.send_message("me", f"🚫 SHUBHALI XABAR ({sp[1]}) — AI javob bermadi\n"
+                                            f"👤 {who(name, username, sender.id)}\n💬 {raw[:800]}\n\n"
+                                            f"⚠️ Havolani ochmang, kod yoki karta ma'lumotini bermang!")
+        return
+    if sp and sp[0] == "link" and time.time() - spam_alert_sent.get(sender.id, 0) > ALERT_COOLDOWN_MIN * 60:
+        spam_alert_sent[sender.id] = time.time()
+        await client.send_message("me", f"🔗 Notanish odam havola yubordi — ochishdan oldin tekshiring\n"
+                                        f"👤 {who(name, username, sender.id)}\n💬 {raw[:800]}")
 
     # --- Dumaloq video / qisqa video: ovoz (Whisper) + tasvir (Gemini) ---
     if event.video_note or (event.video and not event.gif and _video_ok(event)):
@@ -851,11 +1284,15 @@ async def on_private_message(event):
         return
 
     # 3) Ketma-ket yozilgan xabarlarni yig'ib, BITTA javob berish
-    p = pending.setdefault(sender.id, {"texts": [], "images": [], "task": None})
+    p = pending.setdefault(sender.id, {"texts": [], "images": [], "task": None, "voice": False, "img_ids": []})
     if raw:
         p["texts"].append(raw)
     if image and len(p["images"]) < 3:
         p["images"].append(image)
+        if kind == "image":
+            p["img_ids"].append(event.id)
+    if kind == "voice":
+        p["voice"] = True
     if p["task"] and not p["task"].done():
         p["task"].cancel()
     p["task"] = asyncio.create_task(reply_later(event, sender.id, name, username))
@@ -868,17 +1305,33 @@ async def reply_later(event, user_id, name, username=None):
     hist_len = len(history[user_id])
     try:
         await asyncio.sleep(DEBOUNCE_SECONDS)
+        # odam hali yozayotgan bo'lsa ("yozmoqda...") — tugatishini kutamiz (ko'pi bilan 15 s)
+        waited = 0
+        while time.time() - typing_at.get(user_id, 0) < 6 and waited < 15:
+            await asyncio.sleep(0.5)
+            waited += 0.5
         p = pending.get(user_id)
         if not p or not (p["texts"] or p["images"]):
             return
         combined = "\n".join(p["texts"])
         images = list(p["images"])
+        want_voice = p.get("voice", False)
+        img_ids = list(p.get("img_ids", []))
 
         answer = None
         if state["ai_enabled"]:
             async with locks[user_id]:
                 async with client.action(event.chat_id, "typing"):
-                    answer = await ask_ai(user_id, name, combined, images or None)
+                    offer = should_offer(user_id)
+                    answer = await ask_ai(user_id, name, combined, images or None, offer)
+                    if not answer:
+                        # bir vaqtda ko'p odam yozib, daqiqalik limit to'lgan bo'lishi mumkin —
+                        # 20 soniya kutib yana bir marta urinamiz (tarix ikki marta yozilmasin)
+                        h = history[user_id]
+                        while len(h) > hist_len:
+                            h.pop()
+                        await asyncio.sleep(20)
+                        answer = await ask_ai(user_id, name, combined, images or None, offer)
     except asyncio.CancelledError:
         # yangi xabar keldi -> yarim qolgan savolni tarixdan olib tashlaymiz
         h = history[user_id]
@@ -890,9 +1343,16 @@ async def reply_later(event, user_id, name, username=None):
     pending.pop(user_id, None)
     if answer:
         answer = await extract_order(answer, user_id, name, username)
+        answer = await extract_cheque(answer, user_id, name, username, event.chat_id, img_ids)
+        if answer and AI_OFFER_PRICE.split()[0] in answer.replace("\u00a0", " "):
+            state["offered"][str(user_id)] = time.time()
+            save_state()
         if answer:
-            await event.respond(answer)
-            log(f"  -> AI: {answer[:200]}")
+            if want_voice and await send_voice(event.chat_id, answer):
+                log(f"  -> AI (🎤 ovozli): {answer[:200]}")
+            else:
+                await event.respond(answer)
+                log(f"  -> AI: {answer[:200]}")
         return
 
     # AI o'chiq yoki ishlamadi — oddiy javoblar
@@ -902,7 +1362,9 @@ async def reply_later(event, user_id, name, username=None):
     elif matches(text, FAREWELL_RE):
         answer = FAREWELL_REPLY
     elif state["ai_enabled"] and time.time() - busy_sent.get(user_id, 0) > BUSY_REPLY_EVERY_MIN * 60:
-        answer = BUSY_REPLY          # AI limiti tugagan / band — odam javobsiz qolmasin
+        b = busy_info()
+        answer = (f"Assalomu alaykum! {OWNER_NAME} hozir {b[0]}, soat {b[1]} dan keyin javob beradi. 🙏"
+                  if b else BUSY_REPLY)          # AI limiti tugagan / band — odam javobsiz qolmasin
         busy_sent[user_id] = time.time()
     if answer:
         await event.respond(answer)
@@ -911,6 +1373,16 @@ async def reply_later(event, user_id, name, username=None):
 
 def main():
     global ME_ID
+    # Oynasiz ishlaganda (pythonw) kod kiritib bo'lmaydi — sessiya bekor qilingan bo'lsa, aniq xabar beramiz
+    if not (sys.stdin and sys.stdin.isatty()):
+        client.loop.run_until_complete(client.connect())
+        if not client.loop.run_until_complete(client.is_user_authorized()):
+            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ❌ TELEGRAM SESSIYASI BEKOR QILINGAN. "
+                  "run_userbot.bat ni ishga tushirib, telefon raqam va kod bilan qayta kiring. "
+                  "(10 daqiqadan keyin yana tekshiriladi)", flush=True)
+            client.loop.run_until_complete(client.disconnect())
+            time.sleep(600)
+            raise RuntimeError("sessiya bekor qilingan")
     client.start()   # birinchi marta: telefon raqam va kod so'raydi
     me = client.loop.run_until_complete(client.get_me())
     ME_ID = me.id
@@ -927,7 +1399,9 @@ def main():
         ai_txt = f"yoqilgan ({models[0] if ai else '-'}" + \
                  (f" + zaxira: {', '.join(p['name'] for p in PROVIDERS)}" if PROVIDERS else "") + ")"
     print(f"  AI: {ai_txt}")
-    print("  Boshqaruv: Saved Messages'ga /ai on | /ai off | /ai status | /ai hisobot")
+    print("  Boshqaruv: Saved Messages'ga /ai yordam — barcha buyruqlar")
+    print(f"  Eslab qolingan suhbatlar: {len(history)} | Buyurtmalar: {len(orders)} | "
+          f"Ovozli javob: {'bor' if HAS_TTS else 'yo`q'}")
     print(f"  Biznes ma'lumoti: {'bor' if load_biznes() else 'yo`q (biznes.txt ni to`ldiring)'}"
           f" | Ovoz: {'Groq Whisper' if cfg.get('groq_api_key') else 'yo`q'} | Hisobot: {REPORT_HOUR}:00")
     print("==============================")
@@ -950,6 +1424,14 @@ def _keep_awake():
 if __name__ == "__main__":
     # Internet bo'lmasa yoki ulanish uzilsa — 20 soniyadan keyin qayta urinadi
     import time as _t
+    # Bitta nusxa: ikkinchi nusxa ishga tushsa darhol chiqib ketadi (Conflict / database is locked bo'lmasin)
+    import socket as _so
+    _lock = _so.socket(_so.AF_INET, _so.SOCK_STREAM)
+    try:
+        _lock.bind(("127.0.0.1", 47652))
+    except OSError:
+        print("Bu dastur allaqachon ishlayapti — ikkinchi nusxa yopildi.", flush=True)
+        raise SystemExit(0)
     _keep_awake()
     while True:
         try:

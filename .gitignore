@@ -20,3 +20,8 @@ vps_paket.zip
 # Shaxsiy ma'lumotlar
 kunlik_log.json
 biznes.txt
+
+# Suhbatlar va buyurtmalar (shaxsiy)
+suhbatlar.json
+suhbatlar.json.tmp
+buyurtmalar.json

@@ -23,7 +23,7 @@ set EXTRA=
 if exist .env set EXTRA=.env
 if exist biznes.txt set EXTRA=%EXTRA% biznes.txt
 echo [3/4] Fayllar yuklanmoqda (parol so'ralsa - kiriting)...
-scp %EXTRA% bot.py bad_words.py userbot.py bot_config.json userbot_config.json my_account.session requirements.txt setup_vps.sh %SERVER%:telegram-bot/
+scp %EXTRA% bot.py ai_core.py bad_words.py userbot.py bot_config.json userbot_config.json my_account.session requirements.txt setup_vps.sh %SERVER%:telegram-bot/
 if errorlevel 1 goto :err
 
 echo [4/4] Serverda o'rnatilmoqda (parol so'ralsa - kiriting)...

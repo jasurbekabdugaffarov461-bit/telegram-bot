@@ -9,5 +9,7 @@ For i = 1 To 36
 Next
 
 sh.Run "taskkill /IM pythonw.exe /F", 0, True
+sh.Run "powershell -NoProfile -Command ""Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'bot\.py' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }""", 0, True
+WScript.Sleep 2000
 sh.Run "pythonw bot.py", 0, False
 sh.Run "pythonw userbot.py", 0, False
